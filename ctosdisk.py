@@ -1,3 +1,13 @@
+"""
+ctos disk structures
+Scott Baker, https://www.smbaker.com/
+
+This is basically the result of a thorough read of
+http://bitsavers.org/pdf/convergent/manuals_btos/BTOS_CTOS_Disk_Structures.pdf.
+
+For the actual command-line tool, see ctostool.py
+"""
+
 from __future__ import print_function
 
 import os, struct
