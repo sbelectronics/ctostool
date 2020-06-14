@@ -1,0 +1,4 @@
+ccompiler
+-1 -ms -I<btosc><baker>flop144.cbind
+<baker>flop144.obj <btosc>c0s.obj<baker>flop144.run<btosc>clibs.libstop record
+
