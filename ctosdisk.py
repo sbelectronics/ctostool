@@ -10,6 +10,7 @@ For the actual command-line tool, see ctostool.py
 
 from __future__ import print_function
 
+import math
 import os, struct
 import sys
 
@@ -230,8 +231,9 @@ def ReadMFD(data):
     entries = []
 
     offs = vhb["LfaMFDbase"]
+    blkoffs = offs
     for i in range(vhb["CPagedMFD"]):
-        offs += 1 # skip the header
+        offs = blkoffs + 1 # skip the header
         for j in range(14):
             mfdEntry = DecodeStructAsDict(data[offs:], MFD_FIELDS) 
 
@@ -246,7 +248,7 @@ def ReadMFD(data):
 
             offs = offs + 35
 
-        offs = offs + vhb["BytesPerSector"]
+        blkoffs = blkoffs + vhb["BytesPerSector"]
 
     return entries
 
@@ -326,6 +328,21 @@ def FindFile(dirEntries, name):
         if dirEntry["name"].lower() == name.lower():
             return dirEntry["fh"]
     return None
+
+
+def ReadAllocationBitmap(data):
+    # 1 = sector is free, 0 = sector is allocated
+    vhb = LoadVHB(data)
+    nSectors = vhb["SectorsPerTrack"] * vhb["TracksPerCylinder"] * vhb["CylindersPerDisk"]
+    startOffset = vhb["LfaAllocBitMapbase"]
+    bitmapSize = int(math.ceil(nSectors/8.0))
+    bitmap = []
+    for byte in data[startOffset:startOffset+bitmapSize]:
+        b = ord(byte)
+        for i in range(8):
+            bitmap.append(b & 1)
+            b = b >> 1
+    return bitmap
 
 
 def RetrieveContents(data, fh):
