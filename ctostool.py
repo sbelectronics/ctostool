@@ -28,6 +28,7 @@ def hex_escape(s):
     printable = string.ascii_letters + string.digits + string.punctuation + ' '
     return ''.join(c if c in printable else r'\x{0:02x}'.format(ord(c)) for c in s)
 
+
 def parse_args():
     defaults = {}
 
@@ -86,15 +87,18 @@ def parse_args():
 
     return args
 
+
 def getOutputFile(args):
     if args.output == "":
         return sys.stdout
     return open(args.output, "wb")
 
+
 def loadFile(args):
     f = open(args.imagefilename, "rb")
     data = f.read()
     return data
+
 
 def openFile(data, dirName, fileName):
     dir = ReadDir(data, dirName)
@@ -163,18 +167,15 @@ def extract(args):
 
     getOutputFile(args).write(contents)
 
-def extractAll(args):
-    if len(args.args)<1:
-        print("Error: required argument <destdir> is missing", file=sys.stderr)
+
+def extract_all(args):
+
+    if args.output == "":
+        print("Error: required argument <-o OUTPUT>  is missing", file=sys.stderr)
         sys.exit(-1)
 
-    rootDir = args.args[1]
-
+    rootDir = args.output
     data = loadFile(args)
-    fh = openFile(data, args.args[0], args.args[1])
-
-    contents = RetrieveContents(data, fh)
-
     mfd = ReadMFD(data)
 
     for mfdEntry in mfd:
@@ -186,25 +187,21 @@ def extractAll(args):
         dirEntries = ReadDir(data, dirName)
         for dirEntry in dirEntries:
             fileName = dirEntry["name"]
-            if fileName == "." or fileName=="..":
+            if fileName == "." or fileName == "..":
                 print("Skipping file %s % fileName", file=sys.stderr)
                 cotninue
 
-            destDir = os.path.join(rootDir, dir)
+            destDir = os.path.join(rootDir, dirName)
             if not os.path.exists(destDir):
                 os.makedirs(destDir)
 
             fh = openFile(data, dirName, fileName)
             contents = RetrieveContents(data, fh)
 
+            destFileName = os.path.join(destDir, fileName)
+
             print("Creating %s" % destFileName)
-            destFileName = os.path.Join(destDir, fileName)
             open(destFileName, "w").write(contents)
-
-    if args.escape:
-        contents = hex_escape(contents)
-
-    getOutputFile(args).write(contents)
 
 
 def stat(args):
@@ -220,6 +217,7 @@ def stat(args):
             # nonprintable things
             continue
         print("%-20s %s" % (k, v))
+
 
 def setgeometry(args):
     if len(args.args)<4:
@@ -250,6 +248,7 @@ def setgeometry(args):
 
     getOutputFile(args).write(data)
 
+
 def main():
     SanityCheckAll()
 
@@ -262,13 +261,14 @@ def main():
     elif args.command == "extract":
         extract(args)
     elif args.command == "extractall":
-        extractall(args)
+        extract_all(args)
     elif args.command == "stat":
         stat(args)
     elif args.command == "setgeometry":
         setgeometry(args)
     else:
         print("Unrecognized command: %s" % args.command, file=sys.stderr)
+
 
 if __name__ == "__main__":
     main()

@@ -23,6 +23,9 @@ ctostool.py test.img stat Sys Install.Sub
 # extract a file to stdout
 ctostool.py test.img extract Sys Install.sub
 
+# extract all files and folders to output folder
+ctostool.py test.img extractall -o output
+
 # change the geometry to 80 tracks, 2 heads, 16 secotrs, 256 b/sector
 ctostool.py test.img setgeometry 80 2 16 256 > new.img
 ```
