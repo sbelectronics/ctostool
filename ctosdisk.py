@@ -13,6 +13,9 @@ from __future__ import print_function
 import math
 import os, struct
 import sys
+import itertools
+import unicodedata
+import string
 
 VHB_FIELDS = [
     (0,  2, "Checksum"),
@@ -128,6 +131,16 @@ BAD_BLOCK_FIELDS = [
     (256, 256, "RgbBadCylinder")
 ]
 
+def escape2(text):
+    import itertools
+    # Use characters of control category
+    nonprintable = itertools.chain(range(0x00,0x20),range(0x7f,0xa0))
+    # Use translate to remove all non-printable characters
+    return text.translate({character:None for character in nonprintable})
+
+def escape(my_string):
+        return ''.join([x if x in string.printable else '' for x in my_string])
+
 def SanityCheck(st):
     offs = 0
     for field in st:
@@ -196,7 +209,7 @@ def EncodeStruct(src, dest, st, offset=0):
 def PrintStruct(data, st):
     fields = DecodeStructAsList(data, st)
     for field in fields:
-        print("%20s %s" % (field[0], field[1]))
+        print("%20s %s" % (field[0], escape(str(field[1]))))
 
 def ComputeVHBChecksum(data):
     w = 0x7C39
@@ -224,10 +237,11 @@ def VerifyActiveVHB(data):
 
     for (k, v) in vhb.items():
         if vhb2[k] != v:
-            print("Active/Backup VHB Mismatch (field=%s, backup=%s, active=%s)" % (k, v, vhb2[k]), file=sys.stderr)
+            print("Active/Backup VHB Mismatch (field=%s, backup=%s, active=%s)" % (k, escape(str(v)), escape(str(vhb2[k]))), file=sys.stderr)
 
-def ReadMFD(data):
-    vhb = LoadVHB(data)
+def ReadMFD(data, vhb=None):
+    if not vhb:
+        vhb = LoadVHB(data)
     entries = []
 
     offs = vhb["LfaMFDbase"]
@@ -283,9 +297,12 @@ def ReadFileHeader(data, fho):
 
     return fh
 
-def ReadDir(data, name):
-    vhb = LoadVHB(data)
-    mfd = ReadMFD(data)
+def ReadDir(data, name, vhb=None, mfd=None):
+    if not vhb:
+        vhb = LoadVHB(data)
+    if not mfd:
+        mfd = ReadMFD(data, vhb=vhb)
+
     mfdEntry = FindMfd(mfd, name)
     if not mfdEntry:
         print("Failed to find %s in mfd" % name, file=sys.stderr)
@@ -298,6 +315,12 @@ def ReadDir(data, name):
         if ord(data[offs]) == 0:
             offs += 1
             continue
+
+        if ord(data[offs]) == 0xFF:
+            # not sure what FF is for, but found it in the OS dir of my copy1 image
+            offs += 1
+            continue
+
         nameLen = ord(data[offs])
         offs += 1
         name = data[offs:offs+nameLen]
@@ -317,7 +340,7 @@ def ReadDir(data, name):
 def PrintDir(dirEntries):
     print("%-20s %4s %8s %s" % ("NAME", "OFFS", "SIZE", "EXTENTS"))
     for dirEntry in dirEntries:
-        print("%-20s %4d %8d" % (dirEntry["name"], dirEntry["offset"], dirEntry["fh"]["cbFile"]), end="")
+        print("%-20s %4d %8d" % (escape(dirEntry["name"]), dirEntry["offset"], dirEntry["fh"]["cbFile"]), end="")
         for extent in dirEntry["fh"]["extents"]:
             print(" <offs %d, len %d>" % (extent[0], extent[1]), end="")
         print("")

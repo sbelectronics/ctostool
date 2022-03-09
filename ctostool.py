@@ -86,6 +86,9 @@ def parse_args():
 
     return args
 
+def makeSafeFileName(fn):
+    return fn.replace(">", "_").replace("/", "_")
+
 def getOutputFile(args):
     if args.output == "":
         return sys.stdout
@@ -96,8 +99,14 @@ def loadFile(args):
     data = f.read()
     return data
 
-def openFile(data, dirName, fileName):
-    dir = ReadDir(data, dirName)
+def openFile(data, dirName, fileName, vhb=None, mfd=None, dir=None):
+    if not vhb:
+        vhb=LoadVHB(data, vhb)
+    if not mfd:
+        mfd=ReadMFD(data, vhb=vhb, mfd=mfd)
+    if not dir:
+        dir=ReadDir(data, dirName, vhb=vhb, mfd=mfd)
+
     if dir is None:
         print("Error: Dir Not Found: %s" % dirName, file=sys.stderr)
         sys.exit(-1)
@@ -123,6 +132,8 @@ def dump(args):
     VerifyVHBChecksum(data)
     VerifyActiveVHB(data)
 
+    vhb = LoadVHB(data)
+
     allocated = 0
     bitmap = ReadAllocationBitmap(data)
     for bit in bitmap:
@@ -131,15 +142,28 @@ def dump(args):
 
     print("\nAllocation Bitmap Bits Set: %d sectors free" % allocated)
 
-    mfd = ReadMFD(data)
+    mfd = ReadMFD(data, vhb=vhb)
     print("\n== MFD:")
     PrintMfd(mfd)
 
     for mfdEntry in mfd:
         print("\n-- Dir %s" % mfdEntry["dirNameStr"])
-        dirEntries = ReadDir(data, mfdEntry["dirNameStr"])
+        dirEntries = ReadDir(data, mfdEntry["dirNameStr"], vhb=vhb, mfd=mfd)
         PrintDir(dirEntries)
 
+
+def listdir(args):
+    if len(args.args)<1:
+        print("Error: required argument <directory> is missing", file=sys.stderr)
+        sys.exit(-1)
+
+    data = loadFile(args)
+
+    VerifyVHBChecksum(data)
+
+    for arg in args.args:
+        dirEntries = ReadDir(data, arg)
+        PrintDir(dirEntries)
 
 def dumpbitmap(args):
     data = loadFile(args)
@@ -168,14 +192,12 @@ def extractAll(args):
         print("Error: required argument <destdir> is missing", file=sys.stderr)
         sys.exit(-1)
 
-    rootDir = args.args[1]
+    rootDir = args.args[0]
 
     data = loadFile(args)
-    fh = openFile(data, args.args[0], args.args[1])
 
-    contents = RetrieveContents(data, fh)
-
-    mfd = ReadMFD(data)
+    vhb = LoadVHB(data)
+    mfd = ReadMFD(data, vhb=vhb)
 
     for mfdEntry in mfd:
         dirName = mfdEntry["dirNameStr"]
@@ -183,29 +205,23 @@ def extractAll(args):
             print("Skipping directory %s" % dirName, file=sys.stderr)
             continue
 
-        dirEntries = ReadDir(data, dirName)
+        destDir = os.path.join(rootDir, dirName)
+        if not os.path.exists(destDir):
+            os.makedirs(destDir)
+
+        dirEntries = ReadDir(data, dirName, vhb=vhb, mfd=mfd)
         for dirEntry in dirEntries:
             fileName = dirEntry["name"]
             if fileName == "." or fileName=="..":
                 print("Skipping file %s % fileName", file=sys.stderr)
                 cotninue
 
-            destDir = os.path.join(rootDir, dir)
-            if not os.path.exists(destDir):
-                os.makedirs(destDir)
-
-            fh = openFile(data, dirName, fileName)
+            fh = openFile(data, dirName, fileName, vhb=vhb, mfd=mfd, dir=dirEntries)
             contents = RetrieveContents(data, fh)
 
+            destFileName = os.path.join(destDir, makeSafeFileName(fileName))
             print("Creating %s" % destFileName)
-            destFileName = os.path.Join(destDir, fileName)
             open(destFileName, "w").write(contents)
-
-    if args.escape:
-        contents = hex_escape(contents)
-
-    getOutputFile(args).write(contents)
-
 
 def stat(args):
     if len(args.args)<2:
@@ -257,12 +273,14 @@ def main():
 
     if args.command == "dump":
         dump(args)
+    elif args.command == "listdir":
+        listdir(args)
     elif args.command == "dumpbitmap":
         dumpbitmap(args)
     elif args.command == "extract":
         extract(args)
     elif args.command == "extractall":
-        extractall(args)
+        extractAll(args)
     elif args.command == "stat":
         stat(args)
     elif args.command == "setgeometry":
