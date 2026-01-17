@@ -72,14 +72,19 @@ def parse_args():
         type=str,
         help=_help)
 
-    #_help = 'Some help (default: %0.1f)' % SOME_DEFAULT
-    #parser.add_argument(
-    #    '-s', '--someoption', dest='someoption',
-    #    default=defaults["someoption"],
-    #    help=_help)
-
     parser.add_argument("imagefilename")
-    parser.add_argument("command")
+    parser.add_argument("command", choices=[
+        "dump",
+        "listdir",
+        "dumpbitmap",
+        "extract",
+        "extractall",
+        "stat",
+        "setgeometry",
+        "replace",
+        "chkdsk",
+        "delete",
+    ])
     parser.add_argument("args", nargs="*")
 
     args = parser.parse_args()
@@ -293,6 +298,9 @@ def main():
     SanityCheckAll()
 
     args = parse_args()
+
+    # note: see choices in:
+    #    parser.add_argument("command", choices=[
 
     if args.command == "dump":
         dump(args)
