@@ -141,6 +141,12 @@ def escape2(text):
 def escape(my_string):
         return ''.join([x if x in string.printable else '' for x in my_string])
 
+def byteArraySliceToString(ba, start, end):
+    result = ""
+    for b in ba[start:end]:
+        result = result + chr(b)
+    return result
+
 def SanityCheck(st):
     offs = 0
     for field in st:
@@ -185,24 +191,12 @@ def DecodeStructAsDict(data, st):
     return result
 
 def EncodeStruct(src, dest, st, offset=0):
-    # I hate unicode
-    b=bytearray(len(dest))
-    for i in range(len(dest)):
-        b[i] = dest[i]
-    dest = b
-
     #dest = dest.encode("utf-8")
     for field in st:
         (offs, size, name) = field
         v = src[name]
         spec = FieldToSpec(field)
         struct.pack_into(spec, dest, offs + offset, v)
-
-    # unicode hates me too
-    s=""
-    for i in range(len(dest)):
-        s = s + chr(dest[i])
-    dest = s
 
     return dest
 
@@ -278,8 +272,14 @@ def PrintMfd(mfd):
 
 def ReadFileHeader(data, fho):
     vhb = LoadVHB(data)
-    offset = vhb["LfaFileHeadersbase"]
-    offset = offset + fho*512
+    offset = vhb["LfaFileHeadersbase"] + fho*512
+
+    if offset>len(data):
+        # XXX smbaker: maybe an exception would be better
+        # XXX this was observed on scott's AWS disk image
+        print("ERROR: File header offset %d out of range (file header number %d)" % (offset, fho), file=sys.stderr)
+        return None
+
     fh = DecodeStructAsDict(data[offset:], FILE_HEADER_FIELDS)
 
     nameLen = ord(fh["sbFileName"][0])
@@ -288,14 +288,85 @@ def ReadFileHeader(data, fho):
 
     extents = []
     for i in range(32):
+        if i >= fh["iFreeRun"]:
+            # iFreeRun contains the index of the next available entry in the extent list
+            continue
         sector = struct.unpack_from("<L", fh["rgLfaExtents"], i*4)[0]
         length = struct.unpack_from("<L", fh["rgcbExtents"], i*4)[0]
         if sector != 0:
             extents.append( (sector, length) )
 
+    fh["vhb"] = vhb
     fh["extents"] = extents
+    fh["fho"] = fho
+    fh["offset"] = vhb["LfaFileHeadersbase"] + fho*512    
 
     return fh
+
+def EncodeExtents(fh):
+    # clear existing extents
+    lfas = bytearray(fh["rgLfaExtents"])
+    cbs = bytearray(fh["rgcbExtents"])
+    for i in range(32):
+        struct.pack_into("<L", lfas, i*4, 0)
+        struct.pack_into("<L", cbs, i*4, 0)
+
+    for i, extent in enumerate(fh["extents"]):
+        struct.pack_into("<L", lfas, i*4, extent[0])
+        struct.pack_into("<L", cbs, i*4, extent[1])
+
+    fh["iFreeRun"] = len(fh["extents"])
+
+    fh["rgLfaExtents"] = bytes(lfas)
+    fh["rgcbExtents"] = bytes(cbs)
+
+# ReadDirOld - I believe this was wrong, and the wrongness was found on my AWS disk image
+# The directory isn't a series of contiguous sectors, but rather a series of pages, each starting
+# with a byte (meaning unknown). When we hit the first 0 on a page, we are done with it.
+
+def ReadDirOld(data, name, vhb=None, mfd=None):
+    if not vhb:
+        vhb = LoadVHB(data)
+    if not mfd:
+        mfd = ReadMFD(data, vhb=vhb)
+
+    mfdEntry = FindMfd(mfd, name)
+    if not mfdEntry:
+        print("Failed to find %s in mfd" % name, file=sys.stderr)
+        return []
+
+    entries = []
+    offs = mfdEntry["LfaDirbase"]
+
+    lastOffs = offs + mfdEntry["CPages"] * vhb["BytesPerSector"]
+
+    while offs < lastOffs:
+        if data[offs] == 0x00:
+            offs += 1
+            continue
+
+        if data[offs] == 0xFF:
+            # not sure what FF is for, but found it in the OS dir of my copy1 image
+            offs += 1
+            continue
+
+        nameLen = data[offs]
+        offs += 1
+        name = data[offs:offs+nameLen]
+        offs += nameLen
+        fho = struct.unpack_from("<H", data, offs)[0]
+        offs += 2
+
+        fh = ReadFileHeader(data, fho)
+        if fh is None:
+            continue
+
+        if fh["nameStr"] != name:
+            print("File header name mismatch %s != %s" % (name, fh["nameStr"]), file=sys.stderr)
+
+        entries.append( {"name": name, "offset": fho, "fh": fh} )
+
+    return entries
 
 def ReadDir(data, name, vhb=None, mfd=None):
     if not vhb:
@@ -309,33 +380,37 @@ def ReadDir(data, name, vhb=None, mfd=None):
         return []
 
     entries = []
-    offs = mfdEntry["LfaDirbase"]
-    lastOffs = offs + mfdEntry["CPages"] * vhb["BytesPerSector"]
-    while offs < lastOffs:
-        if ord(data[offs]) == 0:
+    pageOffs = mfdEntry["LfaDirbase"]
+
+    for i in range(0, mfdEntry["CPages"]):
+        # dir entries always start after the first byte
+        offs = pageOffs + 1
+        # lastOffs is the end of this page
+        lastOffs = offs + vhb["BytesPerSector"]
+        while offs < lastOffs:
+            if data[offs] == 0x00:
+                break
+
+            nameLen = data[offs]
             offs += 1
-            continue
+            name = byteArraySliceToString(data,offs,offs+nameLen)
+            offs += nameLen
+            fho = struct.unpack_from("<H", data, offs)[0]
+            offs += 2
 
-        if ord(data[offs]) == 0xFF:
-            # not sure what FF is for, but found it in the OS dir of my copy1 image
-            offs += 1
-            continue
+            fh = ReadFileHeader(data, fho)
+            if fh is None:
+                continue
 
-        nameLen = ord(data[offs])
-        offs += 1
-        name = data[offs:offs+nameLen]
-        offs += nameLen
-        fho = struct.unpack_from("<H", data, offs)[0]
-        offs += 2
+            if fh["nameStr"] != name:
+                print("File header name mismatch %s != %s" % (name, fh["nameStr"]), file=sys.stderr)
 
-        fh = ReadFileHeader(data, fho)
-        if fh["nameStr"] != name:
-            print("File header name mismatch %s != %s" % (name, fh["nameStr"]), file=sys.stderr)
+            entries.append( {"name": name, "offset": fho, "fh": fh} )
 
-        entries.append( {"name": name, "offset": fho, "fh": fh} )
+        # point to the next page offset
+        pageOffs = pageOffs + vhb["BytesPerSector"]
 
     return entries
-
 
 def PrintDir(dirEntries):
     print("%-20s %4s %8s %s" % ("NAME", "OFFS", "SIZE", "EXTENTS"))
@@ -352,21 +427,43 @@ def FindFile(dirEntries, name):
             return dirEntry["fh"]
     return None
 
+def BitmapSize(vhb):
+    nSectors = vhb["SectorsPerTrack"] * vhb["TracksPerCylinder"] * vhb["CylindersPerDisk"]
+    bitmapSize = int(math.ceil(nSectors/8.0))
+    return bitmapSize
 
 def ReadAllocationBitmap(data):
     # 1 = sector is free, 0 = sector is allocated
     vhb = LoadVHB(data)
-    nSectors = vhb["SectorsPerTrack"] * vhb["TracksPerCylinder"] * vhb["CylindersPerDisk"]
     startOffset = vhb["LfaAllocBitMapbase"]
-    bitmapSize = int(math.ceil(nSectors/8.0))
+    nSectors = vhb["SectorsPerTrack"] * vhb["TracksPerCylinder"] * vhb["CylindersPerDisk"]
+    bitmapSize = BitmapSize(vhb)
     bitmap = []
-    for byte in data[startOffset:startOffset+bitmapSize]:
-        b = ord(byte)
+    for b in data[startOffset:startOffset+bitmapSize]:
         for i in range(8):
             bitmap.append(b & 1)
             b = b >> 1
+    bitmap = bitmap[:nSectors]
     return bitmap
 
+def WriteAllocationBitmap(data, bitmap):
+    vhb = LoadVHB(data)
+    startOffset = vhb["LfaAllocBitMapbase"]
+    bitmapSize = BitmapSize(vhb)
+    for i in range(bitmapSize):
+        b = 0
+        for j in range(8):
+            bitIndex = i*8 + j
+            if bitIndex < len(bitmap):
+                b = b | (bitmap[bitIndex] << j)
+        struct.pack_into("<B", data, startOffset + i, b)
+
+def GetFreeSector(bitmap):
+    for i, bit in enumerate(bitmap):
+        if bit == 1:
+            bitmap[i] = 0  # Set the bit to allocated
+            return i
+    return None
 
 def RetrieveContents(data, fh):
     result = ""
@@ -379,3 +476,159 @@ def RetrieveContents(data, fh):
 
     return result
 
+def TruncateContents(data, fh, bitmap):
+    for extent in fh["extents"]:
+        (sectorAddr, length) = extent
+        sector = sectorAddr/512
+        count =  int(math.ceil(length/512.0))
+        for i in range(count):
+            bitmap[sector + i] = 1
+    fh["extents"] = []
+
+def Delete(data, fh, bitmap):
+    TruncateContents(data, fh, bitmap)
+    WriteAllocationBitmap(data, bitmap)
+    # TODO: remove from directory
+    errors = CheckDisk(data)
+    if errors != 0:
+        print("Error: disk check failed after ReplaceContents", file=sys.stderr)
+        sys.exit(-1)
+
+def ReplaceContents(data, fh, bitmap, srcData):
+    TruncateContents(data, fh, bitmap)
+
+    origSrcData = srcData
+
+    newLen = len(srcData)
+    curExtent = None
+    while len(srcData) > 0:
+        sector = GetFreeSector(bitmap)
+        if sector is None:
+            print("Error: no free sectors available", file=sys.stderr)
+            sys.exit(-1)
+
+        sectorAddr = sector*512
+
+        thisData = srcData[:512]
+        srcData = srcData[512:]
+
+        if curExtent != None and (curExtent[0] + curExtent[1] == sectorAddr):
+            # extend current extent
+            curExtent[1] += 512
+            fh["extents"][-1] = curExtent
+        else:
+            curExtent = [sectorAddr, 512]
+            fh["extents"].append(curExtent)
+
+        fh["cbFile"] = newLen
+
+        struct.pack_into("<512s", data, sectorAddr, thisData.ljust(512, '\x00'))
+
+    EncodeExtents(fh)
+    UpdateFHChecksum(fh)
+    EncodeStruct(fh, data, FILE_HEADER_FIELDS, fh["offset"])
+
+    WriteAllocationBitmap(data, bitmap)
+
+    errors = CheckDisk(data)
+    if errors != 0:
+        print("Error: disk check failed after ReplaceContents", file=sys.stderr)
+        sys.exit(-1)
+
+    fh = ReadFileHeader(data, fh["fho"])
+    writtenContents = RetrieveContents(data, fh)
+    if writtenContents != origSrcData:
+        print("Error: contents verification failed after ReplaceContents", file=sys.stderr)
+        #open("/tmp/one","w").write(writtenContents)
+        #open("/tmp/two","w").write(origSrcData)
+        sys.exit(-1)
+
+def CheckFHChecksum(fh):
+    data = bytearray(512)
+    EncodeStruct(fh, data, FILE_HEADER_FIELDS, 0)
+    w = fh["vhb"]["MagicWd"]
+    for i in range(256):
+        w = (w - struct.unpack_from("<H", data, 2*i)[0]) & 0xFFFF
+    return (w==0)
+
+def UpdateFHChecksum(fh):
+    data = bytearray(512)
+    fh["Checksum"] = 0
+    EncodeStruct(fh, data, FILE_HEADER_FIELDS, 0)
+    w = 0
+    for i in range(0,256):
+        w = (w + struct.unpack_from("<H", data, 2*i)[0]) & 0xFFFF
+    fh["Checksum"] = (fh["vhb"]["MagicWd"] - w) & 0xFFFF
+
+def CheckDisk(data):
+    vhb = LoadVHB(data)
+    bitmap = ReadAllocationBitmap(data)
+    mfd = ReadMFD(data, vhb=vhb)
+    errors = 0
+
+    foundBitmap = [1]*len(bitmap)
+
+    foundBitmap[0] = 0  # sector 0 is always allocated
+
+    bitmapSectors = int(math.ceil(BitmapSize(vhb)/512.0))
+    if BitmapSize(vhb) % 512 == 0:
+        # possible bug? Noticed one additional page if bitmap consumed the entire last sector
+        bitmapSectors += 1
+    for i in range(0, bitmapSectors):
+        foundBitmap[vhb["LfaAllocBitMapbase"]/512 + i] = 0
+
+    foundBitmap[vhb["LfaVHB"]/512] = 0
+
+    for mfdEntry in mfd:
+        for i in range(0, mfdEntry["CPages"]):
+            foundBitmap[mfdEntry["LfaDirbase"]/512 + i] = 0
+
+        dirEntries = ReadDir(data, mfdEntry["dirNameStr"], vhb=vhb, mfd=mfd)
+        for dirEntry in dirEntries:
+            fh = dirEntry["fh"]
+
+            if not CheckFHChecksum(fh):
+                print("Error: checksum failure in file header for fn=%s" % fh["nameStr"], file=sys.stderr)
+                errors += 1
+
+            for extent in fh["extents"]:
+                start = extent[0]
+                end = extent[0] + extent[1]
+                startSector = start/512
+                endSector = int(math.ceil(end/512.0))
+                for sector in range(startSector, endSector):
+                    if foundBitmap[sector] == 0:
+                        print("Error: sector %d allocated more than once, fn=%s" % (sector, fh["nameStr"]), file=sys.stderr)
+                        errors += 1
+                    foundBitmap[sector] = 0
+                    if bitmap[sector] != foundBitmap[sector]:
+                        print("Error: allocation bitmap mismatch at sector %d: bitmap=%d, found=%d, fn=%s" % (sector, bitmap[sector], foundBitmap[sector], fh["nameStr"]), file=sys.stderr)
+                        errors += 1
+
+
+    for i in range(0, len(bitmap)):
+        if foundBitmap[i]!=0 and bitmap[i] != foundBitmap[i]:
+            print("Error: allocation bitmap mismatch at sector %d: bitmap=%d, found=%d" % (i, bitmap[i], foundBitmap[i]), file=sys.stderr)
+            errors += 1
+
+    return errors
+
+def DumpEverything(data):
+    vhb = LoadVHB(data)
+
+    allocated = 0
+    bitmap = ReadAllocationBitmap(data)
+    for bit in bitmap:
+        if bit:
+            allocated += 1
+
+    print("\nAllocation Bitmap Bits Set: %d sectors free" % allocated)
+
+    mfd = ReadMFD(data, vhb=vhb)
+    print("\n== MFD:")
+    PrintMfd(mfd)
+
+    for mfdEntry in mfd:
+        print("\n-- Dir %s" % mfdEntry["dirNameStr"])
+        dirEntries = ReadDir(data, mfdEntry["dirNameStr"], vhb=vhb, mfd=mfd)
+        PrintDir(dirEntries)

@@ -97,13 +97,20 @@ def getOutputFile(args):
 def loadFile(args):
     f = open(args.imagefilename, "rb")
     data = f.read()
+    f.close()
+    data = bytearray(data)
     return data
+
+def saveFile(args, data):
+    f = open(args.imagefilename, "wb")
+    f.write(data)
+    f.close()
 
 def openFile(data, dirName, fileName, vhb=None, mfd=None, dir=None):
     if not vhb:
         vhb=LoadVHB(data, vhb)
     if not mfd:
-        mfd=ReadMFD(data, vhb=vhb, mfd=mfd)
+        mfd=ReadMFD(data, vhb=vhb)
     if not dir:
         dir=ReadDir(data, dirName, vhb=vhb, mfd=mfd)
 
@@ -119,6 +126,11 @@ def openFile(data, dirName, fileName, vhb=None, mfd=None, dir=None):
 
     return fh
 
+def chkdsk(args):
+    data = loadFile(args)
+    errors = CheckDisk(data)
+    print("Checkdisk Complete, %d errors" % errors)
+
 
 def dump(args):
     data = loadFile(args)
@@ -132,24 +144,7 @@ def dump(args):
     VerifyVHBChecksum(data)
     VerifyActiveVHB(data)
 
-    vhb = LoadVHB(data)
-
-    allocated = 0
-    bitmap = ReadAllocationBitmap(data)
-    for bit in bitmap:
-        if bit:
-            allocated += 1
-
-    print("\nAllocation Bitmap Bits Set: %d sectors free" % allocated)
-
-    mfd = ReadMFD(data, vhb=vhb)
-    print("\n== MFD:")
-    PrintMfd(mfd)
-
-    for mfdEntry in mfd:
-        print("\n-- Dir %s" % mfdEntry["dirNameStr"])
-        dirEntries = ReadDir(data, mfdEntry["dirNameStr"], vhb=vhb, mfd=mfd)
-        PrintDir(dirEntries)
+    DumpEverything(data)
 
 
 def listdir(args):
@@ -187,6 +182,36 @@ def extract(args):
 
     getOutputFile(args).write(contents)
 
+def replace(args):
+    if len(args.args)<3:
+        print("Error: required argument <directory> and <filename> and <srcfile> are missing", file=sys.stderr)
+        sys.exit(-1)
+
+    data = loadFile(args)
+    fh = openFile(data, args.args[0], args.args[1])
+
+    bitmap = ReadAllocationBitmap(data)
+
+    srcData = open(args.args[2], "rb").read()
+    ReplaceContents(data, fh, bitmap, srcData)
+
+    saveFile(args, data)
+
+def delete(args):
+    if len(args.args)<3:
+        print("Error: required argument <directory> and <filename> and <srcfile> are missing", file=sys.stderr)
+        sys.exit(-1)
+
+    data = loadFile(args)
+    fh = openFile(data, args.args[0], args.args[1])
+
+    bitmap = ReadAllocationBitmap(data)
+
+    srcData = open(args.args[2], "rb").read()
+    ReplaceContents(data, fh, bitmap, srcData)
+
+    saveFile(args, data)
+    
 def extractAll(args):
     if len(args.args)<1:
         print("Error: required argument <destdir> is missing", file=sys.stderr)
@@ -285,6 +310,10 @@ def main():
         stat(args)
     elif args.command == "setgeometry":
         setgeometry(args)
+    elif args.command == "replace":
+        replace(args)
+    elif args.command == "chkdsk":
+        chkdsk(args)
     else:
         print("Unrecognized command: %s" % args.command, file=sys.stderr)
 
