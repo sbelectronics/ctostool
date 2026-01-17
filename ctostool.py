@@ -166,7 +166,6 @@ def dumpbitmap(args):
     for i, bit in enumerate(bitmap):
         print("%d:%d" % (i, bit))
 
-
 def extract(args):
     if len(args.args)<2:
         print("Error: required argument <directory> and <filename> are missing", file=sys.stderr)
@@ -198,8 +197,8 @@ def replace(args):
     saveFile(args, data)
 
 def delete(args):
-    if len(args.args)<3:
-        print("Error: required argument <directory> and <filename> and <srcfile> are missing", file=sys.stderr)
+    if len(args.args)<2:
+        print("Error: required argument <directory> and <filename> are missing", file=sys.stderr)
         sys.exit(-1)
 
     data = loadFile(args)
@@ -207,8 +206,7 @@ def delete(args):
 
     bitmap = ReadAllocationBitmap(data)
 
-    srcData = open(args.args[2], "rb").read()
-    ReplaceContents(data, fh, bitmap, srcData)
+    Delete(data, args.args[0], fh, bitmap)
 
     saveFile(args, data)
     
@@ -314,6 +312,8 @@ def main():
         replace(args)
     elif args.command == "chkdsk":
         chkdsk(args)
+    elif args.command == "delete":
+        delete(args)
     else:
         print("Unrecognized command: %s" % args.command, file=sys.stderr)
 

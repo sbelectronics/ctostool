@@ -40,7 +40,7 @@ VHB_FIELDS = [
     (76, 2, "CurrentLogBytes"),
     (78, 4, "LfaFileHeadersbase"),
     (82, 2, "CPagesFilesHeaders"),
-    (84, 2, "AllFileHeaderPageOffset"),
+    (84, 2, "AltFileHeaderPageOffset"),
     (86, 2, "IFreeFileHeader"),
     (88, 2, "CFreeFileHeaders"),
     (90, 2, "ClusterFactor"),
@@ -211,11 +211,20 @@ def ComputeVHBChecksum(data):
         w = w - struct.unpack_from("<H", data, 2*i+2)[0]
     return (w & 0xFFFF)
 
+cpdwarn = False
+
 def LoadVHB(data, which="active"):
     d = DecodeStructAsDict(data, VHB_FIELDS)
     if which == "backup":
         return d
     d = DecodeStructAsDict(data[d["LfaVHB"]:], VHB_FIELDS)
+    if d["CylindersPerDisk"] == 2:
+        # my AWS formatted the disk like this??
+        global cpdwarn
+        if not cpdwarn:
+          print("Warning: CylindersPerDisk is very low (%d). Changing to 77." % d["CylindersPerDisk"] , file=sys.stderr)
+          cpdwarn = True
+        d["CylindersPerDisk"] = 77
     return d
 
 def VerifyVHBChecksum(data, which="backup"):
@@ -320,6 +329,10 @@ def EncodeExtents(fh):
     fh["rgLfaExtents"] = bytes(lfas)
     fh["rgcbExtents"] = bytes(cbs)
 
+def MarkFHDeleted(fh):
+    # deleted file header is indicated by 0 in name length field
+    fh["sbFileName"] = b'\x00' + fh["sbFileName"][1:]
+
 # ReadDirOld - I believe this was wrong, and the wrongness was found on my AWS disk image
 # The directory isn't a series of contiguous sectors, but rather a series of pages, each starting
 # with a byte (meaning unknown). When we hit the first 0 on a page, we are done with it.
@@ -412,6 +425,54 @@ def ReadDir(data, name, vhb=None, mfd=None):
 
     return entries
 
+def RemoveDirEntry(data, directory, nameToDelete, vhb=None, mfd=None):
+    if not vhb:
+        vhb = LoadVHB(data)
+    if not mfd:
+        mfd = ReadMFD(data, vhb=vhb)
+
+    mfdEntry = FindMfd(mfd, directory)
+    if not mfdEntry:
+        print("Failed to find %s in mfd" % name, file=sys.stderr)
+        return []
+
+    pageOffs = mfdEntry["LfaDirbase"]
+
+    for i in range(0, mfdEntry["CPages"]):
+        # dir entries always start after the first byte
+        offs = pageOffs + 1
+        # lastOffs is the end of this page
+        lastOffs = offs + vhb["BytesPerSector"]
+        while offs < lastOffs:
+            if data[offs] == 0x00:
+                break
+
+            nameLen = data[offs]
+            offs += 1
+            name = byteArraySliceToString(data,offs,offs+nameLen)
+            offs += nameLen
+            fho = struct.unpack_from("<H", data, offs)[0]
+            offs += 2
+
+            if name == nameToDelete:
+                # shift remaining entries up
+                entrySize = 1 + nameLen + 2
+                nextEntryOffs = offs
+                while nextEntryOffs < lastOffs:
+                    data[offs - entrySize] = data[nextEntryOffs]
+                    offs += 1
+                    nextEntryOffs += 1
+                # zero out the remaining bytes at the end
+                for j in range(offs - entrySize, lastOffs):
+                    data[j] = 0x00
+                # done with this page
+                break
+
+        # point to the next page offset
+        pageOffs = pageOffs + vhb["BytesPerSector"]
+
+    return 
+
 def PrintDir(dirEntries):
     print("%-20s %4s %8s %s" % ("NAME", "OFFS", "SIZE", "EXTENTS"))
     for dirEntry in dirEntries:
@@ -485,10 +546,23 @@ def TruncateContents(data, fh, bitmap):
             bitmap[sector + i] = 1
     fh["extents"] = []
 
-def Delete(data, fh, bitmap):
+def Delete(data, directory, fh, bitmap):
     TruncateContents(data, fh, bitmap)
     WriteAllocationBitmap(data, bitmap)
-    # TODO: remove from directory
+    RemoveDirEntry(data, directory, fh["nameStr"])
+    MarkFHDeleted(fh)
+    UpdateFHChecksum(fh)
+    EncodeStruct(fh, data, FILE_HEADER_FIELDS, fh["offset"])
+
+    # secondary file headers are a pain...
+    if fh["vhb"]["AltFileHeaderPageOffset"] > 0:
+        secondaryFho = fh["fho"] + fh["vhb"]["AltFileHeaderPageOffset"]
+        secondaryFh = ReadFileHeader(data, secondaryFho)
+        if secondaryFh["FileHeaderNumber"] == fh["FileHeaderNumber"]:
+            MarkFHDeleted(secondaryFh)
+            UpdateFHChecksum(secondaryFh)
+            EncodeStruct(secondaryFh, data, FILE_HEADER_FIELDS, secondaryFh["offset"])
+
     errors = CheckDisk(data)
     if errors != 0:
         print("Error: disk check failed after ReplaceContents", file=sys.stderr)
@@ -568,6 +642,8 @@ def CheckDisk(data):
 
     foundBitmap = [1]*len(bitmap)
 
+    foundHeaders = {}
+
     foundBitmap[0] = 0  # sector 0 is always allocated
 
     bitmapSectors = int(math.ceil(BitmapSize(vhb)/512.0))
@@ -591,6 +667,14 @@ def CheckDisk(data):
                 print("Error: checksum failure in file header for fn=%s" % fh["nameStr"], file=sys.stderr)
                 errors += 1
 
+            foundHeaders[fh["fho"]] = fh
+
+            if vhb["AltFileHeaderPageOffset"] > 0:
+                secondaryFho = fh["fho"] + vhb["AltFileHeaderPageOffset"]
+                secondaryFh = ReadFileHeader(data, secondaryFho)
+                if secondaryFh["FileHeaderNumber"] == fh["FileHeaderNumber"]:
+                    foundHeaders[secondaryFho] = secondaryFh
+
             for extent in fh["extents"]:
                 start = extent[0]
                 end = extent[0] + extent[1]
@@ -609,6 +693,15 @@ def CheckDisk(data):
     for i in range(0, len(bitmap)):
         if foundBitmap[i]!=0 and bitmap[i] != foundBitmap[i]:
             print("Error: allocation bitmap mismatch at sector %d: bitmap=%d, found=%d" % (i, bitmap[i], foundBitmap[i]), file=sys.stderr)
+            errors += 1
+
+    #XXX some drama here around secondary file headers
+    for fho in range(0, vhb["CPagesFilesHeaders"]):
+        fh = ReadFileHeader(data, fho)
+        if fh["sbFileName"][0] == '\0':
+            continue
+        if fho not in foundHeaders:
+            print("Error: Found orphaned file header %d name = %s" % (fho, fh["nameStr"]), file=sys.stderr)
             errors += 1
 
     return errors
